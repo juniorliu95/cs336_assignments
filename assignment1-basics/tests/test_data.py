@@ -7,12 +7,10 @@ import pytest
 from .adapters import run_get_batch
 
 
-def test_get_batch():
+def test_get_batch(device: str):
     dataset = np.arange(0, 100)
     context_length = 7
     batch_size = 32
-    device = "cpu"
-
     # Sanity check to make sure that the random samples are indeed somewhat random.
     starting_indices = Counter()
     num_iters = 1000
@@ -29,9 +27,9 @@ def test_get_batch():
         assert y.shape == (batch_size, context_length)
 
         # Make sure the y's are always offset by 1
-        np.testing.assert_allclose((x + 1).detach().numpy(), y.detach().numpy())
+        np.testing.assert_allclose((x + 1).detach().cpu().numpy(), y.detach().cpu().numpy())
 
-        starting_indices.update(x[:, 0].tolist())
+        starting_indices.update(x[:, 0].detach().cpu().tolist())
 
     # Make sure we never sample an invalid start index
     num_possible_starting_indices = len(dataset) - context_length
