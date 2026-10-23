@@ -9,4 +9,5 @@ from .linear import *
 from .embedding import *
 from .swiglu import swiglu
 from .bpe import *
+from .rope import *
 from .attention import *
