@@ -8,6 +8,23 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
+
+def softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
+    """
+    Given a tensor of inputs, return the output of softmaxing the given `dim`
+    of the input.
+
+    Args:
+        in_features (Float[Tensor, "..."]): Input features to softmax. Shape is arbitrary.
+        dim (int): Dimension of the `in_features` to apply softmax to.
+
+    Returns:
+        Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
+        softmax normalizing the specified `dim`.
+    """
+    exp_x = torch.exp(in_features - torch.max(in_features, dim=dim, keepdim=True).values)
+    return exp_x / torch.sum(exp_x, dim=dim, keepdim=True)
+
 def sigmoid(x: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
     """
     Compute the sigmoid of the input tensor.
@@ -18,20 +35,21 @@ def sigmoid(x: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
     Returns:
         Float[Tensor, "..."]: Tensor with the same shape as `x`, where each element is the sigmoid of the corresponding element in `x`.
     """
-    return 1 / (1 + torch.exp(-x))
+    return torch.div(1, torch.add(1, torch.exp(-x)))
 
 
-def silu(x: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
-    """
-    Compute the SiLU (Sigmoid Linear Unit) activation function of the input tensor.
+def silu(in_features: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
+    """Given a tensor of inputs, return the output of applying SiLU
+    to each element.
 
     Args:
-        x (Float[Tensor, "..."]): Input tensor.
+        in_features(Float[Tensor, "..."]): Input features to run SiLU on. Shape is arbitrary.
 
     Returns:
-        Float[Tensor, "..."]: Tensor with the same shape as `x`, where each element is the SiLU of the corresponding element in `x`.
+        Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
+        SiLU to each element.
     """
-    return x * sigmoid(x)
+    return torch.mul(in_features, sigmoid(in_features))
 
 
 def swiglu(

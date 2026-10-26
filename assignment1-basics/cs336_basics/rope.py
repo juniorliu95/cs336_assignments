@@ -33,6 +33,7 @@ def rope(
     # prepare the basic values
     theta_k_power = torch.div(torch.arange(0, d_k, 2, dtype=torch.float32), d_k) # d_k // 2
     theta_k = torch.div(1, torch.pow(theta, theta_k_power))
+
     theta_matrix = torch.einsum("i,j->ij", token_positions, theta_k) # [sequence_length, d_k // 2]
     cos_theta = torch.cos(theta_matrix)
     sin_theta = torch.sin(theta_matrix)

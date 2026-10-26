@@ -5,9 +5,16 @@ try:
 except importlib.metadata.PackageNotFoundError:
     pass
 
-from .linear import *
-from .embedding import *
-from .swiglu import swiglu
+from .linear import linear
+from .embedding import embedding
+from .activations import *
 from .bpe import *
 from .rope import *
 from .attention import *
+from .rmsnorm import *
+from .transformer import *
+from .gradients import *
+from .loss import *
+from .optimizers import *
+from .schedulers import *
+from .utils import *
