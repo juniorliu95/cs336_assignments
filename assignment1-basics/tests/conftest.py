@@ -12,6 +12,16 @@ class DEFAULT:
     pass
 
 
+@pytest.fixture(scope="session")
+def device() -> str:
+    """Return the fastest device supported by this PyTorch installation."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def _canonicalize_array[A: (np.ndarray, Tensor)](arr: A) -> np.ndarray:
     if isinstance(arr, Tensor):
         arr = arr.detach().cpu().numpy()
