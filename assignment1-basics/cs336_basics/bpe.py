@@ -1,43 +1,92 @@
 """
 bpe for cs336 assignment1 test and for further reuse
-junyu, 2026.10.22
+junyu, 2026.10.26
 """
-import numpy.typing as npt
-import torch
-from jaxtyping import Bool, Float, Int
-from torch import Tensor
+import os
+import regex as re
+from typing import List, Any
+from collections import Counter
 
-def embedding(
+def train_bpe(
+    input_path: str | os.PathLike,
     vocab_size: int,
-    d_model: int,
-    weights: Float[Tensor, " vocab_size d_model"],
-    token_ids: Int[Tensor, " ..."],
-) -> Float[Tensor, " ... d_model"]:
-    """
-    Given the weights of an Embedding layer, get the embeddings for a batch of token ids.
+    special_tokens: list[str],
+    **kwargs,
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    """Given the path to an input corpus, run train a BPE tokenizer and
+    output its vocabulary and merges.
 
     Args:
-        vocab_size (int): The number of embeddings in the vocabulary
-        d_model (int): The size of the embedding dimension
-        weights (Float[Tensor, "vocab_size d_model"]): The embedding vectors to fetch from
-        token_ids (Int[Tensor, "..."]): The set of token ids to fetch from the Embedding layer
+        input_path (str | os.PathLike): Path to BPE tokenizer training data.
+        vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
+        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
+            These strings will never be split into multiple tokens, and will always be
+            kept as a single token. If these special tokens occur in the `input_path`,
+            they are treated as any other string.
 
     Returns:
-        Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
+        tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+            vocab:
+                The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
+                to bytes (token bytes)
+            merges:
+                BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
+                representing that <token1> was merged with <token2>.
+                Merges are ordered by order of creation.
     """
-    assert weights.shape[0] == vocab_size, f"Expected weights shape[0] to be {vocab_size}, but got {weights.shape[0]}"
+    # add initial tokens
+    vocab = {i: bytes([i]) for i in range(256)}
 
-    out = weights[token_ids]
+    # add special tokens
+    next_id = 256
+    for token_str in special_tokens:
+        token_bytes = token_str.encode("utf-8")
+        vocab[next_id] = token_bytes
+        next_id += 1
 
-    assert out.shape[-1] == d_model, f"Expected embedding dimension {d_model}, but got {out.shape[-1]}"
+    merges = []
 
-    return out
+    with open(input_path, "r") as f:
+        data = f.readlines()
 
-if __name__ == "__main__":
-    out = embedding(
-        vocab_size=10_000,
-        d_model=512,
-        weights=torch.randn(10_000, 512),
-        token_ids=torch.randint(0, 10_000, (2, 3)),
-    )
-    print(out.shape)  # should be (2, 3, 512)
+    # pre-tokenization to remove dirty items
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    word_counter = Counter()
+
+    for subtext in data: 
+        matches = re.finditer(PAT, subtext)
+        
+        for match in matches:
+            match_text = match.group()
+            word_counter[match_text] += 1
+
+    pre_counter = Counter()
+    for item in list(word_counter):
+        item_text, count = item
+        for i in range(len(item_text)-1):
+            pre_counter[(item_text[i], item_text[i+1])] += 1
+
+    # training steps
+    while pre_counter and len(vocab) < vocab_size:
+        merge_step(word_counter, pre_counter, merges)
+
+    
+    return vocab, merges
+
+
+def merge_step(word_counter: Counter, pre_counter: Counter, merges: List[Any]) -> None:
+    max_value = max(pre_counter.values())
+    max_item = max([item for item, count in pre_counter.items() if count == max_value])
+    max_item_bytes = (max_item[0].encode("utf-8"), max_item[1].encode("utf-8"))
+    merges.append(max_item_bytes)
+
+    # remove the max item, find new pairs including the max item, add to the pre_counter
+    pre_counter.pop(max_item)
+
+    new_token = ''.join(max_item)
+    for item in list(word_counter):
+        item_text, count = item
+        new_token_inds = [m.start() for m in re.finditer(new_token, item_text)]
+        for new_token_ind in new_token_inds:
+            
+
