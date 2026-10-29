@@ -7,7 +7,6 @@ import regex as re
 from typing import List, Dict, Any
 from collections import Counter
 
-# from .pretokenization import find_chunk_boundaries
 
 def train_bpe(
     input_path: str | os.PathLike,

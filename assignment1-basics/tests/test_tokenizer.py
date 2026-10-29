@@ -178,12 +178,14 @@ def test_ascii_string_matches_tiktoken():
         vocab_path=VOCAB_PATH, merges_path=MERGES_PATH, special_tokens=["<|endoftext|>"]
     )
     test_string = "Hello, how are you?"
+    # test_string = "Hello"
 
     reference_ids = reference_tokenizer.encode(test_string)
     ids = tokenizer.encode(test_string)
     # assert ids == reference_ids
 
     tokenized_string = [tokenizer.decode([x]) for x in ids]
+    # print("-----------", tokenized_string)
     assert tokenized_string == ["Hello", ",", " how", " are", " you", "?"]
 
     assert tokenizer.decode(ids) == test_string

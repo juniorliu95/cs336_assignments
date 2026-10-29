@@ -24,9 +24,25 @@ class Tokenizer():
         """
         self.vocab = vocab
         self.merges = merges
-        self.special_tokens = special_tokens
+        self.special_tokens = []
+        # for death use case like special_tokens=["<|endoftext|>", "<|endoftext|><|endoftext|>"]
+        if special_tokens:
+            self.special_tokens = sorted(special_tokens, key=lambda x: -len(x))
+        
+        # # Add missing special tokens to the vocabulary
+        # if self.special_tokens:
+        #     next_id = max(self.vocab.keys()) + 1 if self.vocab else 256
+        #     existing_bytes = set(self.vocab.values())
+        #     import pdb;pdb.set_trace()
+        #     for special_token in self.special_tokens:
+        #         st_bytes = special_token.encode("utf-8")
+        #         if st_bytes not in existing_bytes:
+        #             self.vocab[next_id] = st_bytes
+        #             existing_bytes.add(st_bytes)
+        #             next_id += 1
+
         self.revert_vocab = {}
-        for k, v in vocab.items():
+        for k, v in self.vocab.items():
             if v not in self.revert_vocab:
                 self.revert_vocab[v] = k
             elif k < self.revert_vocab[v]: # handle duplicated values, keep smaller key
@@ -59,17 +75,19 @@ class Tokenizer():
         res = []
         data = []
         if self.special_tokens:
-            special_matches = re.finditer("|".join(self.special_tokens), text)
+            # there can be `|` in special tokens
+            escaped_specials = [re.escape(tok) for tok in self.special_tokens]
+            special_matches = re.finditer("|".join(escaped_specials), text)
             str_begin = 0
             for special_match in special_matches:
                 special_token = special_match.group()
-                special_byte = special_token.encode("utf-8")
+                special_byte =special_token.encode("utf-8")
                 special_id = self.revert_vocab[special_byte]
                 sp_start, sp_end = special_match.start(), special_match.end()
                 if sp_start > str_begin:
-                    subtext = text[str_begin, sp_start]
+                    subtext = text[str_begin:sp_start]
                     data.append(subtext)
-                data.append[special_id]
+                data.append(special_id)
 
                 str_begin = sp_end
             if str_begin < len(text):
@@ -93,7 +111,7 @@ class Tokenizer():
                 splited_string = [bytes([b]) for b in match_text.encode("utf-8")]
                 splited_res = [self.revert_vocab[ss] for ss in splited_string]
                 # make the logic similar to bpe training. each loop take the highest merge
-                while len(splited_string) > 2:
+                while len(splited_string) >= 2:
                     candidates = {} # merge_pair_ind: merge_rank
                     for i in range(len(splited_string) - 1):
                         merge_pair = (splited_string[i], splited_string[i+1])
@@ -116,7 +134,7 @@ class Tokenizer():
         """
 
         for text in iterable:
-            return self.encode(text)
+            yield from self.encode(text)
 
 
     def decode(self, ids: list[int]) -> str:
