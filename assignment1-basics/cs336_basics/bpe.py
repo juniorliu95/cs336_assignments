@@ -65,8 +65,6 @@ def train_bpe(
         
         for match in matches:
             match_text = match.group()
-            if match_text in special_tokens:
-                continue
             splited_string = [bytes([b]) for b in match_text.encode("utf-8")]
             splited_data.append(splited_string)
 
