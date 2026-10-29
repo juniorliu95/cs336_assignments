@@ -4,8 +4,9 @@ junyu, 2026.10.26
 """
 import os
 import regex as re
-from typing import List, Any
+from typing import List, Dict, Any
 from collections import Counter
+
 
 def train_bpe(
     input_path: str | os.PathLike,
@@ -47,46 +48,77 @@ def train_bpe(
     merges = []
 
     with open(input_path, "r") as f:
-        data = f.readlines()
+        # data = f.readlines() # ! readlines will ignore the \n!
+        data = f.read()
 
-    # pre-tokenization to remove dirty items
+    if special_tokens:
+        data = re.split("|".join(special_tokens), data)
+
+    # pre-tokenization and init the counter
     PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    word_counter = Counter()
+    splited_data = []
+    pre_counter = Counter()
 
-    for subtext in data: 
+    for subtext in data:
         matches = re.finditer(PAT, subtext)
         
         for match in matches:
             match_text = match.group()
-            word_counter[match_text] += 1
+            splited_string = [bytes([b]) for b in match_text.encode("utf-8")]
+            splited_data.append(splited_string)
 
-    pre_counter = Counter()
-    for item in list(word_counter):
-        item_text, count = item
-        for i in range(len(item_text)-1):
-            pre_counter[(item_text[i], item_text[i+1])] += 1
+            for i in range(len(splited_string)-1): 
+                pre_counter[(splited_string[i], splited_string[i+1])] += 1
 
     # training steps
-    while pre_counter and len(vocab) < vocab_size:
-        merge_step(word_counter, pre_counter, merges)
+    while pre_counter and splited_data and len(vocab) < vocab_size:
+        merge_step(splited_data, pre_counter, vocab, merges)
 
-    
     return vocab, merges
 
 
-def merge_step(word_counter: Counter, pre_counter: Counter, merges: List[Any]) -> None:
+def merge_step(splited_data: List[Any], pre_counter: Counter, vocab: Dict, merges: List[Any]) -> None:
+    # find out current max
     max_value = max(pre_counter.values())
-    max_item = max([item for item, count in pre_counter.items() if count == max_value])
-    max_item_bytes = (max_item[0].encode("utf-8"), max_item[1].encode("utf-8"))
-    merges.append(max_item_bytes)
+    max_items = [k for k, v in pre_counter.items() if v==max_value]
+    merge_item = max(max_items)
+    new_token = merge_item[0] + merge_item[1]
+    # import pdb;pdb.set_trace()
+    merges.append(merge_item)
+    vocab[len(vocab)] = new_token
 
-    # remove the max item, find new pairs including the max item, add to the pre_counter
-    pre_counter.pop(max_item)
-
-    new_token = ''.join(max_item)
-    for item in list(word_counter):
-        item_text, count = item
-        new_token_inds = [m.start() for m in re.finditer(new_token, item_text)]
-        for new_token_ind in new_token_inds:
+    # update pre_counter and splited_data
+    pre_counter.pop(merge_item)
+    i = 0
+    splited_to_remove = []
+    while i < len(splited_data):
+        splited_d = splited_data[i]
+        if merge_item[0] in splited_d and merge_item[1] in splited_d:
+            j = 0
+            while j <len(splited_d) - 1:
+                if (splited_d[j], splited_d[j+1]) == merge_item:
+                    # left side update
+                    if j-1 >= 0:
+                        left_pair = (splited_d[j-1], splited_d[j])
+                        pre_counter[left_pair] -= 1
+                        pre_counter[(splited_d[j-1], new_token)] += 1 # count + 1 before the actual text change for convinience
+                        if pre_counter[left_pair] == 0:
+                            del pre_counter[left_pair]
+                    # right side update
+                    if j+2 < len(splited_d):
+                        right_pair = (splited_d[j+1], splited_d[j+2])
+                        pre_counter[right_pair] -= 1
+                        pre_counter[(new_token, splited_d[j+2])] += 1 # count + 1 before the actual text change for convinience                            
+                        if pre_counter[right_pair] == 0:
+                            del pre_counter[right_pair] 
+                    splited_d[j+1] = new_token
+                    del splited_d[j]
+                else:
+                    j += 1
+        # we dont need that item anymore if no new token can be gen
+        if len(splited_d) == 1:
+            del splited_data[i]
+        else:
+            i += 1
             
 

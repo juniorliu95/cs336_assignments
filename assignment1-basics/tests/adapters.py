@@ -598,4 +598,8 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    return cs336_basics.train_bpe(input_path, vocab_size, special_tokens, **kwargs)
+    desired_num_chunks = 4 # test multiprocess
+    if desired_num_chunks > 1:
+        return cs336_basics.train_bpe_multiprocess(input_path, vocab_size, special_tokens, desired_num_chunks=desired_num_chunks)
+    else:
+        return cs336_basics.train_bpe(input_path, vocab_size, special_tokens, **kwargs)

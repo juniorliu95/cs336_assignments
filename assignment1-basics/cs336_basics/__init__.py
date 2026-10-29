@@ -9,6 +9,7 @@ from .linear import linear
 from .embedding import embedding
 from .activations import *
 from .bpe import train_bpe
+from .bpe_multiprocess import train_bpe_multiprocess
 from .rope import *
 from .attention import *
 from .rmsnorm import *
