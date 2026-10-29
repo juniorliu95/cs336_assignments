@@ -5,6 +5,116 @@ hard the first time, organized in the order I encountered the corresponding
 functions.  It is intentionally about invariants and mental models, rather
 than a copy of an implementation.
 
+## Achievements
+
+### Timeline
+
+| Date | Milestone |
+| --- | --- |
+| 2026-10-19 – 10-22 | Repo set up; core functions and tests added; device auto-detection |
+| 2026-10-23 | RoPE finished |
+| 2026-10-26 – 10-28 | Attention, transformer LM, and training utilities done ("assignment 1 until last", PR #1) |
+| 2026-10-28 | BPE training (`train_bpe`) |
+| 2026-10-29 | Tokenizer fixes; multiprocess BPE training |
+| 2026-10-30 | PR #2 merged into `main` |
+
+### What I implemented from scratch
+
+Everything below is in `assignment1-basics/cs336_basics/` and wired into
+`tests/adapters.py`. Only primitive PyTorch tensor ops are used, not
+`torch.nn` layers or `torch.optim` optimizers.
+
+| Area | Components | Module |
+| --- | --- | --- |
+| Building blocks | `linear`, `embedding`, `silu`, `swiglu`, `softmax`, `rmsnorm` | `linear.py`, `embedding.py`, `activations.py`, `rmsnorm.py` |
+| Attention | `rope`, `scaled_dot_product_attention`, `multihead_self_attention` (+ RoPE variant), causal masking | `rope.py`, `attention.py` |
+| Model | Pre-norm `transformer_block`, full `transformer_lm` (embeddings → blocks → final RMSNorm → LM head) | `transformer.py` |
+| Training | `cross_entropy` (stable log-sum-exp), global-norm `gradient_clipping`, `AdamW` (decoupled weight decay, plus `amsgrad` and `maximize` options), warmup + cosine `get_lr_cosine_schedule`, `save_checkpoint` / `load_checkpoint` | `loss.py`, `gradients.py`, `optimizers.py`, `schedulers.py`, `utils.py` |
+| Tokenization | Byte-level `train_bpe`, `train_bpe_multiprocess`, `Tokenizer` (`encode`, `decode`, `encode_iterable`, special tokens) | `bpe.py`, `bpe_multiprocess.py`, `tokenizer.py`, `pretokenization.py` |
+
+### Final multiprocess BPE training (`bpe_multiprocess.py`)
+
+`run_train_bpe` in `tests/adapters.py` now calls
+`train_bpe_multiprocess(..., desired_num_chunks=4)`. The single-process
+`train_bpe` remains as the fallback branch.
+
+Pipeline:
+
+1. **Initial vocabulary:** 256 single bytes, then the special tokens
+   (IDs 256, 257, …).
+2. **Read the option:** `desired_num_chunks = kwargs.pop("desired_num_chunks",
+   os.cpu_count())`. Using `pop` keeps it out of any `**kwargs` forwarded later.
+3. **Chunk boundaries:** open the file in binary mode and call
+   `find_chunk_boundaries` once per special token. Union all results into a set
+   and sort them. Every boundary is the start of some special token, so no chunk
+   cuts a token or crosses a document boundary.
+4. **Tasks:** one `(input_path, start, end, special_tokens)` tuple per pair of
+   adjacent boundaries. Each worker reads only its own byte range from disk; the
+   whole corpus is never sent between processes.
+5. **Map:** `Pool(processes=desired_num_chunks).map(_process_chunk, tasks)`.
+   `_process_chunk` is a top-level function (so it can be pickled). It seeks to
+   `start`, reads `end - start` bytes, decodes them, splits on special tokens,
+   runs `PAT`, turns each pre-token into a list of single bytes, and returns a
+   local pair `Counter` plus its token lists.
+6. **Reduce:** `pre_counter.update(...)` and `splited_data.extend(...)` for each
+   result. `pool.map` keeps input order, so the token lists stay in corpus
+   order.
+7. **Merge loop (sequential):** `merge_step` runs until `vocab_size` is
+   reached. It is the same incremental neighbour-count update as the
+   single-process version: highest count wins, ties go to the lexicographically
+   greater pair.
+
+**Measured speed-up of pre-tokenization**, on `tinystories_sample_5M.txt`:
+
+| Processes | Pre-tokenization time |
+| --- | --- |
+| 1 | 3.46 s |
+| 4 | 1.45 s |
+| 16 | 0.93 s |
+
+The merge loop is still sequential and dominates total training time.
+
+**Design decisions I can defend:**
+
+- Only pre-tokenization is parallel. Each merge depends on the counts left by
+  the previous merge, and sending data to worker processes on every merge would
+  cost more than it saves.
+- Processes, not threads: regex pre-tokenization is CPU-bound and limited by
+  the GIL.
+- Taking the union of per-token boundaries is valid for any number of special
+  tokens; it may just produce more chunks than requested.
+
+### Bugs I found and fixed along the way
+
+- Learned merges inside special tokens (`b'<|'`) → split on special tokens
+  before `PAT`.
+- Lost `\n\n` pre-tokens by reading line by line → read the whole file.
+- `decode` decoded each token separately → join the bytes, then decode once
+  with `errors="replace"`.
+- `encode` duplicated or dropped bytes and skipped the last merge → replay
+  merges by lowest rank in a `while len >= 2` loop over a list of pieces.
+- Unescaped `|` in the special-token regex and shorter special tokens matching
+  first → `re.escape` the tokens and sort them longest first.
+- `encode_iterable` returned after the first line → `yield from`.
+- Duplicate byte values in the vocabulary → `revert_vocab` keeps the smallest
+  ID.
+
+### Still open
+
+- `run_get_batch` in `tests/adapters.py` still raises `NotImplementedError`,
+  and `model.py` is empty. The training loop, text generation, and the
+  TinyStories / OpenWebText experiments are not done yet.
+- BPE cleanups, listed under sections 13–15:
+  - escape the special tokens in the training `re.split`;
+  - count unique pre-tokens with frequencies instead of storing every
+    occurrence;
+  - stop negative counts when a pair overlaps itself (`A A A`);
+  - precompute merge ranks instead of calling `merges.index`;
+  - fall back to `[0, file_size]` when there are no special tokens.
+- `merge_step` is copied into `bpe_multiprocess.py` rather than imported from
+  `bpe.py`, and `_process_chunk`'s docstring lists three return values but the
+  function returns two.
+
 ## 1. `rope`
 
 ### What was difficult / mistakes I made
@@ -558,6 +668,234 @@ character can also consist of multiple code points.
 decoded text should reproduce the original bytes; if ignored errors made bytes
 disappear, it will not.
 
+## 13. `train_bpe`
+
+### What was difficult / mistakes I made
+
+- After merging `(a, b)` into `ab`, I knew to remove the `(a, b)` count but was
+  unsure how to find and decrement the neighbouring pairs, such as `(b, c)` in
+  `a b c`.
+- I worried that the left neighbour `x` might itself be a merged token, which
+  seemed to make the pair to decrement hard to find.
+- I started by keeping whole pre-tokens as strings instead of splitting them
+  into their starting units (bytes) before the merge loop.
+- I was unsure whether a new vocabulary entry should be `bytes` or `str`.
+- The special token was split by `PAT`, so `(b'<', b'|')` became one of the most
+  frequent pairs and `b'<|'` was learned as a merge.
+- I read the corpus line by line, so `\n\n` never appeared as one pre-token and
+  the merge list differed from the snapshot (`(b'\n', b'\n')` at index 627).
+- Gemini told me the tie-break should pick the *first* pair to reach the
+  maximum count. That was wrong: the handout breaks ties with the
+  lexicographically **greater** pair, which `max(max_items)` already did. The
+  real cause of the index-627 mismatch was the line-by-line reading.
+- I stored one token list per pre-token *occurrence*, so every merge rescans
+  millions of duplicate lists. That made `test_train_bpe_speed` slow.
+
+### Durable model
+
+BPE training is a greedy loop over pair counts. The state is: each pre-token as
+a list of its **current** tokens (starting as single bytes), plus a global
+count of adjacent pairs. Each step:
+
+1. pick the most frequent pair (ties → lexicographically greater pair);
+2. record the merge and add `a + b` (a `bytes` object) to the vocabulary;
+3. in every pre-token that contains the pair, replace `a, b` with `ab` from left
+   to right, and update counts for the neighbours: decrement `(x, a)` and
+   `(b, c)`, increment `(x, ab)` and `(ab, c)`.
+
+Neighbours are read from the current token list, so a merged neighbour such as
+`un` in `[un, h, a, ...]` is already one item: the pair to decrement is
+`(un, h)`. You never have to reconstruct merge history.
+
+Pre-tokenization fixes the boundaries that merges cannot cross: first split on
+special tokens (they are removed from training data entirely and added to the
+vocabulary as whole tokens), then apply `PAT` to each piece. Read the file as
+one string so multi-line whitespace stays one pre-token.
+
+For speed, count unique pre-tokens: `{tuple_of_tokens: frequency}`. A merge
+then updates each unique word once, weighted by its frequency, instead of once
+per occurrence.
+
+### Formula / state anchor
+
+Initial vocabulary: 256 single bytes + special tokens. Number of merges =
+`vocab_size − 256 − len(special_tokens)`. A merge's token ID is assigned in
+creation order, so a lower ID (above 256 + specials) means an earlier merge.
+
+### Concept Q&A
+
+**Q: When `(a, b)` merges inside `x a b c`, which counts change?**  
+**A:** `(a, b)` loses this occurrence, `(x, a)` and `(b, c)` are decremented,
+and `(x, ab)` and `(ab, c)` are incremented, each by the pre-token's frequency.
+
+**Q: What if the neighbour is already a merged token?**  
+**A:** That's fine. The list holds current tokens, so the neighbour is one
+element and the pair is read directly.
+
+**Q: Should vocab values be `bytes`?**  
+**A:** Yes. Work in bytes from the start; then `a + b` is already `bytes`.
+
+**Q: Can I put the special tokens into `PAT`?**  
+**A:** Yes, if they come first in the alternation and the loop skips their
+matches. Splitting on them before `PAT` is equivalent. Either way they must not
+contribute pair counts.
+
+**Q: How are ties broken?**  
+**A:** By the lexicographically greater pair of `bytes`, i.e. `max(...)` over
+the tied pairs. Not by first appearance.
+
+**Q: Can the merge loop be parallelized?**  
+**A:** No in practice. Merge `k` depends on the counts left by merge `k−1`, and
+sending the data to worker processes on every step costs far more than the
+update. Speed it up with unique-word counts (and optionally a pair → words
+index) instead.
+
+### Known issues still in my code
+
+- `re.split("|".join(special_tokens), data)` does not escape the tokens. With
+  `<|endoftext|>` the pattern means `<` OR `endoftext` OR `>`, so it deletes
+  every `<`, `>` and the word `endoftext` from the corpus, and leaves `|`
+  characters behind. The tests pass only because TinyStories rarely contains
+  them. Use `re.escape` on each token, as `encode` already does.
+- When a pair overlaps itself (`A A A`, merge `(A, A)`), the right neighbour is
+  the popped merge pair, so `pre_counter[(A, A)]` goes to `-1`. `Counter` does
+  not raise an error (Gemini said it would raise `KeyError`), but a stale
+  negative entry stays in the counter.
+- Pre-tokens are still stored per occurrence rather than deduplicated.
+
+**Debug invariant:** after each merge, the incrementally updated pair counts
+must equal a full recount over the current token lists.
+
+## 14. `Tokenizer` (`encode`, `decode`, `encode_iterable`)
+
+### What was difficult / mistakes I made
+
+- `decode` decoded each token's bytes separately and joined the strings. A
+  multi-byte character split across tokens (`🙃` = `f0 9f 99 83`) cannot decode
+  piece by piece.
+- My first `encode` loop used `for i in range(len - 1)` and checked one pair at
+  a time. It dropped the last byte and, after a merge, processed the second byte
+  of the pair again. The pdb clue was 5 bytes `f0 9f 9f 99 83` for a 4-byte
+  emoji.
+- I worried the IDs `[8582, 253, 247, 225]` were wrong because they were not
+  `[240, 159, 153, 131]`. They were right: the GPT-2 fixture vocabulary does not
+  map byte `b` to ID `b`.
+- `while len(tokens) > 2` skipped the final merge of a 2-token list, so `Hello`
+  stayed `['H', 'ello']`.
+- Gemini then claimed tiktoken ignores merges and that I needed vocabulary-rank
+  merging. That was a detour. Merge-rank BPE with the `>= 2` fix matches the
+  test.
+- `KeyError: b'endoftext'`: the special tokens were joined into a regex without
+  escaping, so `|` acted as alternation.
+- With `["<|endoftext|>", "<|endoftext|><|endoftext|>"]`, the shorter token
+  matched first, so the double token came out as two singles.
+- `encode_iterable` used `return` inside the loop, so only the first line (`\n`)
+  was encoded.
+
+### Durable model
+
+**Encode** = the same pipeline as training, but with merges replayed instead of
+learned:
+
+1. split the text on special tokens (escaped, **longest first**) and emit each
+   special token's ID directly;
+2. apply `PAT` to each normal piece;
+3. for each pre-token, start from single bytes and repeatedly merge the
+   adjacent pair with the **lowest merge rank** (earliest learned) until no pair
+   in the list is in the merges. Keep the result as a list: its elements are the
+   token boundaries.
+4. map each final token to its ID.
+
+Merges can produce multi-byte tokens (`th` + `e` → `the`). That's why the
+loop rescans the updated list each round and cannot be a single left-to-right
+`for` pass.
+
+**Decode** = concatenate all token bytes first, then decode once with
+`errors="replace"` (the handout requires U+FFFD for malformed bytes).
+
+**encode_iterable** is a generator: `yield from self.encode(chunk)` for each
+chunk. Each line keeps its trailing `\n`, so no text is lost between chunks.
+
+### Concept Q&A
+
+**Q: Why decode after joining?**  
+**A:** One token may hold only part of a UTF-8 code point. Only the full byte
+sequence is valid UTF-8.
+
+**Q: Must token IDs for raw bytes equal the byte value?**  
+**A:** No. IDs come from the loaded vocabulary. Always go through
+`revert_vocab`.
+
+**Q: Concatenate the pieces at the end of `encode`?**  
+**A:** No. The list of pieces *is* the tokenization; joining it would undo it.
+
+**Q: Why sort special tokens by length?**  
+**A:** Regex alternation takes the first alternative that matches, not the
+longest. Longest-first makes overlapping specials work.
+
+**Q: Why escape special tokens?**  
+**A:** `<|endoftext|>` contains `|`, a regex metacharacter.
+
+**Q: What happens when the vocabulary has duplicate byte values?**  
+**A:** Build `revert_vocab` to keep the smallest ID. The naive `{v: k}`
+comprehension keeps the last one.
+
+**Performance note:** `self.merges.index(pair)` is O(number of merges) per
+lookup. Precompute `rank = {pair: i for i, pair in enumerate(merges)}`.
+
+**Debug invariant:** `decode(encode(s)) == s` for any string, including emoji,
+empty strings and adjacent special tokens. Also check single-token decoding:
+`[decode([i]) for i in encode(s)]` should give the expected pieces.
+
+## 15. Parallel pre-tokenization (`find_chunk_boundaries` + `multiprocessing`)
+
+### What was difficult / mistakes I made
+
+- I first asked about multithreading. CPU-bound regex work in Python needs
+  processes, not threads (GIL).
+- `find_chunk_boundaries` takes one special token; I needed to support
+  several.
+- I wasn't sure `pool.map` returns results in order.
+- I wanted `desired_num_chunks` to pass through `**kwargs` without breaking
+  the adapter signature.
+
+### Durable model
+
+Only pre-tokenization and initial counting are parallel (map–reduce): split the
+file at special-token positions, so no chunk cuts a token or crosses a document
+boundary; each worker reads its byte range and returns local counts; the
+parent sums them and runs the sequential merge loop.
+
+Running `find_chunk_boundaries` once per special token and taking
+`sorted(set(union))` is valid: every boundary is the start of some special
+token, so chunks are still independent. You may just get more chunks than
+requested, which is fine.
+
+The worker must be a top-level function so it can be pickled.
+`pool.map`/`imap` keep input order; `imap_unordered` does not. Order only
+matters if you keep a per-occurrence list; counts don't care.
+
+`kwargs.pop("desired_num_chunks", default)` reads the option and removes it,
+so it isn't forwarded twice downstream.
+
+### Concept Q&A
+
+**Q: Threads or processes?**  
+**A:** Processes. The GIL serializes CPU-bound Python code.
+
+**Q: Multiple special tokens with `find_chunk_boundaries`?**  
+**A:** Union the boundaries from each token, or search each mini-chunk for the
+earliest occurrence of any token.
+
+**Q: Does `pool.map` preserve order?**  
+**A:** Yes.
+
+**Edge case in my code:** with `special_tokens=[]`, no boundaries are computed
+and there are no tasks. Fall back to `[0, file_size]`.
+
+**Debug invariant:** multiprocess and single-process training on the same file
+must produce identical `vocab` and `merges`.
+
 ## Cross-cutting testing and workflow lessons
 
 - Read the adapter and the test name before assuming a test is absent. `pytest -k`
@@ -569,3 +907,10 @@ disappear, it will not.
   generated files. A new module is not tracked until it is staged and committed.
 - When a tensor test fails, start with semantic axes, shapes, and one tiny
   hand-checked example before changing formulas broadly.
+- Check assistant advice against the handout and against my own code. In the
+  BPE chat, three confident suggestions were wrong: the "first pair" tie-break,
+  the tiktoken vocabulary-rank detour, and a `while i += 1` bug in code I never
+  had. A pdb print of the actual bytes found the real bug faster.
+- For snapshot tests, the first differing index (e.g. merge 627) points to the
+  first divergence. Inspect that pair. `(b'\n', b'\n')` pointed straight at how
+  the file was read.
